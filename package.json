@@ -1,0 +1,31 @@
+{
+	"name": "pi-plan-build",
+	"version": "1.0.0",
+	"description": "PLAN/BUILD mode for the pi coding agent: Tab toggle, KV-cache-stable, zero context bloat",
+	"keywords": [
+		"pi-package",
+		"pi-coding-agent",
+		"extension",
+		"plan-mode"
+	],
+	"license": "MIT",
+	"files": [
+		"extensions",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"jiti": "^2.7.0"
+	},
+	"scripts": {
+		"test": "node test/smoke.cjs"
+	}
+}
