@@ -4,6 +4,18 @@ PLAN/BUILD mode for the [pi coding agent](https://github.com/earendil-works/pi) 
 Designed for local models (llama.cpp, one GPU): a mode switch never invalidates the KV-cache
 prefix and never grows the context.
 
+> **A letter to the readers**
+>
+> This project was created entirely by a local model: **Qwen3.8-27B (Q4)**, 200k context,
+> on a single **RTX 3090 24GB** + 32GB RAM + a 12-core / 24-thread Xeon — no cloud APIs.
+> Generation ran at 50–60 tok/s at the start of a session and drops to 20–32 tok/s once the
+> context is already filled; every design decision in this package (static system-prompt contract,
+> ~4-token ephemeral markers, zero context bloat) is a direct answer to that fading.
+>
+> The story is simple: pi was missing the plan/build workflow I had in opencode, so I wrote
+> the task down and handed it to the model — and over many small iterations, bit by bit,
+> we built this together. Take it, use it, break it, and make it better.
+
 ## What it does
 
 - **Tab** (or `/plan`, `/build`, `pi --plan`) toggles between two modes:
@@ -42,8 +54,8 @@ permanently bloats the context — the two failure modes this package avoids.
 Requires pi ≥ 0.84.
 
 ```bash
-# from git (pinned ref; update with: pi install git:<repo>@<new-ref>)
-pi install git:github.com/sugusei/pi-plan-build@v1.0.0
+# from git (pinned ref; update with: pi install git:github.com/Develeps/pi-plan-build@<new-ref>)
+pi install git:github.com/Develeps/pi-plan-build@v1.0.0
 
 # try from a local checkout without publishing (pi remove <same-spec> to undo)
 pi install /absolute/path/to/pi-plan-build
@@ -61,7 +73,7 @@ it after installing the package — otherwise the extension loads twice.
 {
 	"packages": [
 		{
-			"source": "git:github.com/sugusei/pi-plan-build@v1.0.0",
+			"source": "git:github.com/Develeps/pi-plan-build@v1.0.0",
 			"extensions": []
 		}
 	]
