@@ -34,11 +34,14 @@ stay warm only while the prefix is byte-identical:
 1. **Static contract** — a `before_agent_start` hook appends a fixed, mode-*independent*
    section to the system prompt describing both modes. Byte-identical on every run →
    the prefix never changes on a toggle.
-2. **Ephemeral marker** — a `context` hook (fires before *every* LLM call) appends the
-   current short marker `[MODE: PLAN]` / `[MODE: BUILD]` (~4 tokens) to a deep copy of
-   the messages that is used for that request only — it is never written to the session.
-   Toggling Tab 100× adds **zero** tokens to the context; a toggle costs ~4 tokens of
-   tail re-prefill on the next LLM call.
+2. **Ephemeral marker (on change only)** — a `context` hook (fires before each LLM call)
+   appends the current short marker `[MODE: PLAN]` / `[MODE: BUILD]` (~4 tokens) to a deep
+   copy of the messages, but only when the model could have lost the mode: the first call
+   of a session, a mode toggle, or a context reset (compaction / session swap — detected
+   via a fingerprint of the first message). During a running task (unchanged mode, tool
+   loop) the marker is **not** repeated — its absence means "the mode has not changed"
+   (the contract says so). The copy is never written to the session, so toggling Tab 100×
+   adds **zero** tokens to the context.
 3. **State** — toggles persist `{mode}` via `pi.appendEntry("mode-state")` (custom
    entries do not participate in LLM context).
 4. **Enforcement** — a `tool_call` hook blocks mutating tools and non-allowlisted bash

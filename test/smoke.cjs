@@ -78,13 +78,13 @@ function check(name, cond, extra) {
 
 	// ---- 1. fresh session start (no entries, no flag) → build ----
 	await run("session_start", { type: "session_start", reason: "startup" });
-	check("fresh start → BUILD", calls.ui_status === "▶ BUILD  [tab→plan]", String(calls.ui_status));
+	check("fresh start → BUILD", calls.ui_status === "▶ BUILD v4  [tab→plan]", String(calls.ui_status));
 	check("fresh start → no marker message sent", calls.messages.length === 0, JSON.stringify(calls.messages));
 	check("fresh start → no mode-state entry (build is default)", calls.entries.length === 0, JSON.stringify(calls.entries));
 
 	// ---- 2. tab → plan ----
 	await calls.shortcuts.tab.handler(ctx);
-	check("tab → PLAN status", calls.ui_status === "⏸ PLAN  [tab→build]", String(calls.ui_status));
+	check("tab → PLAN status", calls.ui_status === "⏸ PLAN v4  [tab→build]", String(calls.ui_status));
 	check("tab → mode-state entry persisted", calls.entries.length === 1 && calls.entries[0].data.mode === "plan", JSON.stringify(calls.entries));
 	check("tab → NO marker message sent (the v3 fix)", calls.messages.length === 0, JSON.stringify(calls.messages));
 	check("tab → notify shown", ctx.ui.notifications.some(([, m]) => m.includes("PLAN")), JSON.stringify(ctx.ui.notifications));
@@ -98,9 +98,9 @@ function check(name, cond, extra) {
 		calls.entries.length === n0 + 9 && calls.entries.every((e) => e.customType === "mode-state"),
 		`${calls.entries.length - n0} entries`,
 	);
-	check("mash: final mode BUILD (1 plan + 9 toggles)", calls.ui_status === "▶ BUILD  [tab→plan]", String(calls.ui_status));
+	check("mash: final mode BUILD (1 plan + 9 toggles)", calls.ui_status === "▶ BUILD v4  [tab→plan]", String(calls.ui_status));
 	await calls.shortcuts.tab.handler(ctx); // → plan again for enforcement tests
-	check("back on PLAN for enforcement tests", calls.ui_status === "⏸ PLAN  [tab→build]");
+	check("back on PLAN for enforcement tests", calls.ui_status === "⏸ PLAN v4  [tab→build]");
 
 	// ---- 4. before_agent_start → static contract ----
 	const sp1 = (await run("before_agent_start", { type: "before_agent_start", prompt: "hi", systemPrompt: "BASE PROMPT", systemPromptOptions: {} }))?.systemPrompt;
@@ -145,6 +145,26 @@ function check(name, cond, extra) {
 		res2?.messages.at(-1)?.content === "[MODE: BUILD]" && calls.messages.length === 0,
 	);
 
+	// ---- 5b. v4: no marker repeat during a running task ----
+	const resSame = await run("context", { type: "context", messages: [{ role: "user", content: "x" }] });
+	check(
+		"v4: unchanged mode + unchanged first message → NO marker (task continues)",
+		resSame === undefined || resSame.messages?.at(-1)?.customType !== "mode-marker",
+		JSON.stringify(resSame),
+	);
+	const resCompacted = await run("context", {
+		type: "context",
+		messages: [
+			{ role: "user", content: "COMPACTED SUMMARY" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+		],
+	});
+	check(
+		"v4: context reset (new first message, i.e. compaction) → marker re-injected (BUILD)",
+		resCompacted?.messages.at(-1)?.content === "[MODE: BUILD]",
+		JSON.stringify(resCompacted?.messages?.at(-1)),
+	);
+
 	// ---- 6. tool_call enforcement (toggle back to PLAN) ----
 	await calls.shortcuts.tab.handler(ctx); // build → plan
 	const blockWrite = await run("tool_call", { type: "tool_call", toolName: "write", toolCallId: "1", input: { path: "/tmp/x", content: "y" } });
@@ -169,7 +189,7 @@ function check(name, cond, extra) {
 	// ---- 7. resume: session_start with persisted entry restores mode ----
 	calls.entries.push({ type: "custom", customType: "mode-state", data: { mode: "plan" } });
 	await run("session_start", { type: "session_start", reason: "resume", previousSessionFile: "/x" });
-	check("resume restores PLAN from entry", calls.ui_status === "⏸ PLAN  [tab→build]", String(calls.ui_status));
+	check("resume restores PLAN from entry", calls.ui_status === "⏸ PLAN v4  [tab→build]", String(calls.ui_status));
 	const entriesAfterResume = calls.entries.length;
 	check("resume does not duplicate entry (mode already persisted)", calls.entries.length === entriesAfterResume);
 
@@ -177,8 +197,16 @@ function check(name, cond, extra) {
 	calls.flags.plan.value = true;
 	calls.entries.length = 0;
 	await run("session_start", { type: "session_start", reason: "startup" });
-	check("--plan flag → PLAN", calls.ui_status === "⏸ PLAN  [tab→build]", String(calls.ui_status));
+	check("--plan flag → PLAN", calls.ui_status === "⏸ PLAN v4  [tab→build]", String(calls.ui_status));
 	check("--plan fresh → entry persisted for later resume", calls.entries.length === 1 && calls.entries[0].data.mode === "plan");
+
+	// ---- 9. v4: first call after session_start re-injects the marker ----
+	const resFirstAfterFlag = await run("context", { type: "context", messages: [{ role: "user", content: "y" }] });
+	check(
+		"v4: first call after session_start (reset) re-injects marker (PLAN)",
+		resFirstAfterFlag?.messages.at(-1)?.content === "[MODE: PLAN]",
+		JSON.stringify(resFirstAfterFlag?.messages?.at(-1)),
+	);
 
 	console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURES`);
 	process.exit(failures === 0 ? 0 : 1);

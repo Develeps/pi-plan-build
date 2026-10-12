@@ -1,5 +1,5 @@
 /**
- * PLAN / BUILD modes, switched with Tab — v3 (flat context).
+ * PLAN / BUILD modes, switched with Tab — v4 (flat context, marker on change).
  *
  * Problem v2 solved: a mode switch must NEVER change the request prefix
  * (system prompt / tool list). On local models (llama.cpp, one GPU) any
@@ -12,7 +12,7 @@
  * session, and every full cache miss (server restart / eviction)
  * re-prefills that bloat too.
  *
- * v3 keeps the prefix byte-stable AND keeps the context flat:
+ * v4 keeps the prefix byte-stable AND keeps the context flat:
  *
  *  1. CONTRACT (system prompt, static):
  *     before_agent_start appends a fixed, mode-INDEPENDENT section
@@ -21,16 +21,21 @@
  *     → toggling never invalidates the cache. (v1's mistake was making
  *     the system prompt mode-DEPENDENT.)
  *
- *  2. MARKER (ephemeral, ~4 tokens, tail):
+ *  2. MARKER (ephemeral, ~4 tokens, tail, only when needed):
  *     The `context` event fires before every LLM call with a deep copy
  *     of the messages. The handler (a) strips all persisted
  *     "mode-marker" messages (v2 legacy in old sessions), (b) appends
  *     the current short marker `[MODE: PLAN]` / `[MODE: BUILD]` at the
- *     very tail. The copy is used for this request only — it is never
+ *     very tail ONLY when the model could have lost the mode: first
+ *     call of a session, mode toggle, or a context reset (compaction /
+ *     session swap — detected via a fingerprint of the first message).
+ *     During a running task (stable tool loop, mode unchanged) NO
+ *     marker is added — absence means "mode unchanged" (per the
+ *     contract). The copy is used for this request only — it is never
  *     persisted → toggling (even 100×) adds zero tokens to the
- *     session; a toggle costs ~4 tail tokens of re-prefill on the next
- *     LLM call. Within a tool loop the marker sits after the fresh
- *     assistant/tool messages, which are new (re-prefilled) anyway.
+ *     session. (v3 re-injected the marker on EVERY LLM call; the user
+ *     saw it repeated in the session for every step of a long task —
+ *     v4 removes that repetition.)
  *
  *  3. STATE (appendEntry, zero LLM cost):
  *     Toggles persist `{mode}` via pi.appendEntry("mode-state") — a
@@ -46,10 +51,11 @@
  *     stable, so the model still sees the tools and gets a blocking
  *     error on misuse — the intended trade on a single GPU.
  *
- * Side effects of the v3 design:
- *  - Compaction can no longer desync the mode (the marker is
- *    re-injected on EVERY LLM call) → v2's turn_end re-sync detector
- *    is deleted.
+ * Side effects of the v4 design:
+ *  - Compaction cannot desync the mode: after compaction the first
+ *    message (and hence the fingerprint) changes, so the marker is
+ *    re-injected on the next call → v2's turn_end re-sync detector
+ *    stays deleted.
  *  - Legacy v2 sessions: their persisted long markers are stripped
  *    from the LLM's view from the first call after /reload (one-time
  *    re-prefill), then the context is flat again.
@@ -82,6 +88,15 @@ const MODE_STATE = "mode-state";
 // (provider payloads never include it, but determinism is free).
 const MARKER_TS = Date.now();
 
+// v4: cheap "was the context reset?" check. Within a tool loop the first
+// message of the session stays put; after compaction / a session swap it
+// changes → the fingerprint changes → the marker must be re-injected.
+function contextFingerprint(messages: unknown[]): string {
+	const first = messages[0] as { timestamp?: unknown; content?: unknown } | undefined;
+	if (!first) return "empty";
+	return `${first.timestamp ?? ""}:${JSON.stringify(first.content ?? "").slice(0, 160)}`;
+}
+
 export const PLAN_MARKER_TEXT = "[MODE: PLAN]";
 export const BUILD_MARKER_TEXT = "[MODE: BUILD]";
 
@@ -89,7 +104,7 @@ export const BUILD_MARKER_TEXT = "[MODE: BUILD]";
 // in both modes → KV prefix stable across toggles. The marker at the
 // tail of the message list is the only mode-specific bytes.
 export const MODE_CONTRACT = `## Plan/Build modes
-This session runs in one of two modes. A marker line — ${PLAN_MARKER_TEXT} or ${BUILD_MARKER_TEXT} — is appended at the very end of the message list on every request; it states the current mode and is authoritative (any older [MODE] markers in the history are stale — ignore them). The user switches modes with Tab (or /plan, /build).
+This session runs in one of two modes. A marker line — ${PLAN_MARKER_TEXT} or ${BUILD_MARKER_TEXT} — appears at the end of the message list whenever the mode changes (also on session start and after compaction); it states the current mode and is authoritative (any older [MODE] markers in the history are stale — ignore them). If no [MODE] marker is present in the current context, the mode has not changed since the last marker you saw; the default mode is BUILD. The user switches modes with Tab (or /plan, /build).
 
 - ${PLAN_MARKER_TEXT} — read-only analysis and planning. The harness enforces this: edit / write / powershell tool calls are blocked, and bash is limited to read-only allowlisted commands (blocked calls return an error — do not retry them). Your task: 1) explore and understand the codebase with read-only tools; 2) ask clarifying questions if the request is ambiguous; 3) finish with a concrete numbered plan under a "Plan:" header, each step naming the files to change; 4) do NOT implement anything and never present unexecuted changes as done.
 - ${BUILD_MARKER_TEXT} — normal operation: full tools enabled, PLAN restrictions lifted. If a plan was produced in PLAN mode, execute its steps in order.`;
@@ -219,6 +234,11 @@ export default function planBuildExtension(pi: ExtensionAPI): void {
 	let mode: Mode = "build";
 	let persistedMode: Mode | null = null;
 
+	// v4: the marker is shown only when the model could have lost the mode
+	// (first call, toggle, context reset). Remembers the last state for
+	// which the marker was actually injected.
+	let lastInjected: { mode: Mode; fp: string } | null = null;
+
 	function persistMode(): void {
 		if (persistedMode === mode) return;
 		persistedMode = mode;
@@ -238,8 +258,8 @@ export default function planBuildExtension(pi: ExtensionAPI): void {
 		ctx.ui.setStatus(
 			"plan-build",
 			mode === "plan"
-				? ctx.ui.theme.fg("warning", "⏸ PLAN  [tab→build]")
-				: ctx.ui.theme.fg("muted", "▶ BUILD  [tab→plan]"),
+				? ctx.ui.theme.fg("warning", "⏸ PLAN v4  [tab→build]")
+				: ctx.ui.theme.fg("muted", "▶ BUILD v4  [tab→plan]"),
 		);
 	}
 
@@ -304,6 +324,8 @@ export default function planBuildExtension(pi: ExtensionAPI): void {
 		// Persist only a non-default state that is not already recorded
 		// (e.g. fresh start via --plan); a bare "build" default needs no entry.
 		if (restored !== mode && mode !== "build") persistMode();
+		// New context for the model → the first LLM call must show the marker.
+		lastInjected = null;
 		updateStatus(ctx);
 	});
 
@@ -312,14 +334,28 @@ export default function planBuildExtension(pi: ExtensionAPI): void {
 		return { systemPrompt: event.systemPrompt + "\n\n" + MODE_CONTRACT };
 	});
 
-	// Ephemeral tail marker, injected before EVERY LLM call. The returned
-	// messages replace the request only — the session file is untouched,
-	// so toggling never grows the context. Stripping persisted markers
-	// also cleans up v2 legacy from old sessions (one-time re-prefill).
+	// Ephemeral tail marker, v4: injected only when the model could have
+	// lost the mode — first call of the session, mode toggle, or context
+	// reset (compaction / session swap, via the fingerprint). During a
+	// running task the marker is NOT repeated: its absence means
+	// "mode unchanged" (per the contract). The returned messages replace
+	// the request only — the session file is untouched, so toggling never
+	// grows the context. Stripping persisted markers also cleans up v2
+	// legacy from old sessions (one-time re-prefill).
 	pi.on("context", (event) => {
+		const filtered = event.messages.filter((m) => !isModeMarker(m));
+		const fp = contextFingerprint(filtered);
+		if (lastInjected && lastInjected.mode === mode && lastInjected.fp === fp) {
+			// No mode change, no context reset → the model has already seen
+			// the marker; return a replacement only if a legacy marker was
+			// actually stripped.
+			if (filtered.length === event.messages.length) return undefined;
+			return { messages: filtered };
+		}
+		lastInjected = { mode, fp };
 		return {
 			messages: [
-				...event.messages.filter((m) => !isModeMarker(m)),
+				...filtered,
 				{
 					role: "custom" as const,
 					customType: MODE_MARKER,
